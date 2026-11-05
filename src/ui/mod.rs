@@ -81,7 +81,6 @@ pub struct AdaApp {
 
     tray: Option<tray::Tray>,
     tray_rx: Receiver<TrayAction>,
-    activate_rx: Receiver<()>,
     hidden: bool,
     quitting: bool,
     told_about_tray: bool,
@@ -95,7 +94,8 @@ pub struct AdaApp {
     adding: HashSet<AppId>,
 
     textures: HashMap<ImageKey, TextureHandle>,
-    requested: HashSet<ImageKey>,
+    /// Images requested from the worker and when; failed ones are retried after a while.
+    requested: HashMap<ImageKey, Instant>,
     logo: TextureHandle,
     notes_cache: notes::NotesCache,
 
@@ -118,13 +118,17 @@ impl AdaApp {
         let (worker, events) = worker::spawn(state.clone(), move || repaint_ctx.request_repaint());
 
         let (tray_tx, tray_rx) = mpsc::channel();
-        let tray = tray::create(ctx.clone(), tray_tx);
+        let tray = tray::create(ctx.clone(), tray_tx.clone());
 
-        let (activate_tx, activate_rx) = mpsc::channel::<()>();
+        // Later launches (`ada-steam-update`, `--quit`) talk to us through the same channel as the tray.
         if let Some(l) = listener {
             let ctx = ctx.clone();
-            platform::serve_activation(l, move || {
-                let _ = activate_tx.send(());
+            platform::serve_signals(l, move |signal| {
+                let action = match signal {
+                    platform::Signal::Show => TrayAction::Show,
+                    platform::Signal::Quit => TrayAction::Quit,
+                };
+                let _ = tray_tx.send(action);
                 ctx.request_repaint();
             });
         }
@@ -136,8 +140,9 @@ impl AdaApp {
             ctx.load_texture("ada-logo", img, TextureOptions::LINEAR)
         };
 
-        // Without a tray there is nowhere to hide: start minimized instead.
+        // Without a tray there is nowhere to hide: make sure the window exists and start minimized.
         if start_hidden && tray.is_none() {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
         }
 
@@ -148,7 +153,6 @@ impl AdaApp {
             hidden: start_hidden && tray.is_some(),
             tray,
             tray_rx,
-            activate_rx,
             quitting: false,
             told_about_tray: false,
             page: Page::Library,
@@ -159,7 +163,7 @@ impl AdaApp {
             add: None,
             adding: HashSet::new(),
             textures: HashMap::new(),
-            requested: HashSet::new(),
+            requested: HashMap::new(),
             logo,
             notes_cache: notes::NotesCache::default(),
             toasts: Vec::new(),
@@ -183,7 +187,10 @@ impl AdaApp {
         if let Some(t) = self.textures.get(&key) {
             return Some(t.clone());
         }
-        if self.requested.insert(key.clone()) {
+        let retry = Duration::from_secs(worker::IMAGE_RETRY_SECS as u64 + 1);
+        let due = self.requested.get(&key).is_none_or(|t| t.elapsed() > retry);
+        if due {
+            self.requested.insert(key.clone(), Instant::now());
             self.worker.send(Command::LoadImage(key));
         }
         None
@@ -495,11 +502,9 @@ impl eframe::App for AdaApp {
                 TrayAction::Quit => {
                     self.quitting = true;
                     ctx.send_viewport_cmd(ViewportCommand::Close);
+                    ctx.request_repaint();
                 }
             }
-        }
-        while self.activate_rx.try_recv().is_ok() {
-            self.show_window(ctx);
         }
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && close_to_tray && self.tray.is_some() {

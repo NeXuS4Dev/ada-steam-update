@@ -115,6 +115,9 @@ pub enum Event {
 pub struct WorkerHandle {
     tx: Sender<Command>,
     images: Sender<ImageKey>,
+    /// Used to run interactive work (search, add) immediately on its own thread,
+    /// instead of queueing it behind a potentially long check run.
+    checker: Checker,
 }
 
 impl WorkerHandle {
@@ -122,6 +125,11 @@ impl WorkerHandle {
         match cmd {
             Command::LoadImage(key) => {
                 let _ = self.images.send(key);
+            }
+            Command::Search { request, term } => self.checker.search(request, term),
+            Command::Add(id) => {
+                let checker = self.checker.clone();
+                thread::spawn(move || checker.add(id));
             }
             other => {
                 let _ = self.tx.send(other);
@@ -138,11 +146,13 @@ pub fn spawn(state: SharedState, repaint: impl Fn() + Send + Sync + 'static) -> 
     let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(repaint);
     let client = SteamClient::new();
 
+    let checker =
+        Checker { state: state.clone(), client: client.clone(), events: ev_tx.clone(), repaint: repaint.clone() };
     {
-        let (state, client, ev_tx, repaint) = (state.clone(), client.clone(), ev_tx.clone(), repaint.clone());
+        let checker = checker.clone();
         thread::Builder::new()
             .name("ada-checker".into())
-            .spawn(move || Checker { state, client, events: ev_tx, repaint }.run(cmd_rx))
+            .spawn(move || checker.run(cmd_rx))
             .expect("spawn checker thread");
     }
     {
@@ -153,9 +163,10 @@ pub fn spawn(state: SharedState, repaint: impl Fn() + Send + Sync + 'static) -> 
             .expect("spawn image thread");
     }
 
-    (WorkerHandle { tx: cmd_tx, images: img_tx }, ev_rx)
+    (WorkerHandle { tx: cmd_tx, images: img_tx, checker }, ev_rx)
 }
 
+#[derive(Clone)]
 struct Checker {
     state: SharedState,
     client: SteamClient,
@@ -169,7 +180,7 @@ impl Checker {
         (self.repaint)();
     }
 
-    fn run(self, rx: Receiver<Command>) {
+    fn run(&self, rx: Receiver<Command>) {
         // Check right away on launch: this is what surfaces updates that shipped
         // while the app was closed.
         self.check_all();
@@ -182,11 +193,11 @@ impl Checker {
             match rx.recv_timeout(wait) {
                 Ok(Command::CheckAll) | Err(RecvTimeoutError::Timeout) => self.check_all(),
                 Ok(Command::Check(id)) => {
-                    let found = self.check_games(&[id]);
+                    let found = self.check_games(&[id], true);
                     self.finish(found, false);
                 }
-                Ok(Command::Add(id)) => self.add(id),
-                Ok(Command::Search { request, term }) => self.search(request, term),
+                // Handled directly by `WorkerHandle::send`.
+                Ok(Command::Add(_) | Command::Search { .. }) => {}
                 Ok(Command::Reschedule) => {
                     let mut s = self.state.lock();
                     let base = s.status.last_check.unwrap_or_else(now);
@@ -213,7 +224,7 @@ impl Checker {
 
     fn check_all(&self) {
         let ids: Vec<AppId> = self.state.lock().library.games.iter().map(|g| g.app_id).collect();
-        let found = self.check_games(&ids);
+        let found = self.check_games(&ids, false);
         self.finish(found, true);
     }
 
@@ -243,7 +254,8 @@ impl Checker {
         (self.repaint)();
     }
 
-    fn check_games(&self, ids: &[AppId]) -> Vec<FoundUpdate> {
+    /// `user_initiated`: report failures to the UI (background runs only update the status).
+    fn check_games(&self, ids: &[AppId], user_initiated: bool) -> Vec<FoundUpdate> {
         let mut found = Vec::new();
         let mut failures = 0usize;
         let mut offline_failures = 0usize;
@@ -270,7 +282,7 @@ impl Checker {
                         g.last_checked = Some(now());
                     }
                     drop(s);
-                    if ids.len() == 1 {
+                    if user_initiated {
                         self.emit(Event::CheckFailed { app_id: id, error: msg });
                     }
                 }
@@ -395,6 +407,9 @@ impl Checker {
 // Images
 // ---------------------------------------------------------------------------
 
+/// Minimum delay before a failed image download is attempted again.
+pub const IMAGE_RETRY_SECS: i64 = 30;
+
 fn image_loop(
     rx: Receiver<ImageKey>,
     client: SteamClient,
@@ -405,13 +420,15 @@ fn image_loop(
 ) {
     let mut failed: HashMap<ImageKey, Timestamp> = HashMap::new();
     while let Ok(key) = rx.recv() {
-        if failed.get(&key).is_some_and(|t| now() - t < 300) {
+        if failed.get(&key).is_some_and(|t| now() - t < IMAGE_RETRY_SECS) {
             continue;
         }
         let (file, urls) = match &key {
             ImageKey::Header(id) => {
                 let header = state.lock().library.game(*id).and_then(|g| g.header_path.clone());
-                (cache.join(format!("header-{id}.jpg")), steam::header_urls(*id, header.as_deref()))
+                // Keyed by the art path too, so a game's new artwork replaces the cached one.
+                let tag = fnv1a(header.as_deref().unwrap_or(""));
+                (cache.join(format!("header-{id}-{tag:08x}.jpg")), steam::header_urls(*id, header.as_deref()))
             }
             ImageKey::Url(url) => (cache.join(format!("url-{:016x}.img", fnv1a(url))), vec![url.clone()]),
         };

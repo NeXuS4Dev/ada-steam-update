@@ -4,6 +4,8 @@
 use std::sync::mpsc::Sender;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Without a tray (Linux) `CheckNow` is never sent.
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 pub enum TrayAction {
     Show,
     CheckNow,
@@ -21,6 +23,7 @@ mod imp {
         normal: tray_icon::Icon,
         badged: tray_icon::Icon,
         badge_on: bool,
+        tooltip: String,
     }
 
     impl Tray {
@@ -31,7 +34,10 @@ mod imp {
                 let icon = if on { self.badged.clone() } else { self.normal.clone() };
                 let _ = self.icon.set_icon(Some(icon));
             }
-            let _ = self.icon.set_tooltip(Some(tooltip));
+            if self.tooltip != tooltip {
+                self.tooltip = tooltip.to_owned();
+                let _ = self.icon.set_tooltip(Some(tooltip));
+            }
         }
     }
 
@@ -87,7 +93,7 @@ mod imp {
             }
         }));
 
-        Some(Tray { icon: tray, normal, badged, badge_on: false })
+        Some(Tray { icon: tray, normal, badged, badge_on: false, tooltip: String::new() })
     }
 }
 

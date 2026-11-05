@@ -21,11 +21,21 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Ada Steam Update {}\n\nUSAGE:\n  ada-steam-update [--minimized]\n\nOPTIONS:\n  --minimized   Start hidden in the system tray\n  {AUTOSTART_ARG}   Used when launched at login (honours the 'start in background' setting)\n\nENVIRONMENT:\n  {}   Store data in this directory (portable mode)",
+            "Ada Steam Update {}\n\nUSAGE:\n  ada-steam-update [--minimized | --quit]\n\nOPTIONS:\n  --minimized   Start hidden in the system tray\n  --quit        Exit the running instance\n  {AUTOSTART_ARG}   Used when launched at login (honours the 'start in background' setting)\n\nENVIRONMENT:\n  {}   Store data in this directory (portable mode)",
             env!("CARGO_PKG_VERSION"),
             store::DATA_DIR_ENV
         );
         return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--quit") {
+        return match platform::send_signal(platform::Signal::Quit) {
+            Ok(true) => Ok(()),
+            _ => {
+                eprintln!("Ada Steam Update is not running.");
+                std::process::exit(1);
+            }
+        };
     }
 
     let listener = match platform::acquire_instance() {

@@ -88,14 +88,43 @@ pub fn notify(summary: &str, body: &str) {
 // ---------------------------------------------------------------------------
 
 const INSTANCE_PORT: u16 = 47_613;
-const HELLO: &str = "ADA-STEAM-UPDATE/1 SHOW";
-const ACK: &str = "ADA-STEAM-UPDATE/1 OK";
+const PROTO: &str = "ADA-STEAM-UPDATE/1";
+
+/// A request from a second launch to the running instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// Bring the window to the front.
+    Show,
+    /// Exit the running instance (`--quit`).
+    Quit,
+}
+
+impl Signal {
+    fn as_str(self) -> &'static str {
+        match self {
+            Signal::Show => "SHOW",
+            Signal::Quit => "QUIT",
+        }
+    }
+
+    fn parse(line: &str) -> Option<Self> {
+        match line.trim().strip_prefix(PROTO)?.trim() {
+            "SHOW" => Some(Signal::Show),
+            "QUIT" => Some(Signal::Quit),
+            _ => None,
+        }
+    }
+}
 
 pub enum Instance {
-    /// We are the primary instance; activation requests arrive on this listener.
+    /// We are the primary instance; signals from later launches arrive on this listener.
     Primary(Option<TcpListener>),
-    /// Another instance is running and has been asked to show itself.
+    /// Another instance is running and has received our signal.
     Secondary,
+}
+
+fn instance_addr() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], INSTANCE_PORT))
 }
 
 /// Ensure only one instance runs. A second launch asks the first to come to the front.
@@ -103,11 +132,10 @@ pub enum Instance {
 /// Uses a loopback socket with a tiny handshake, which works identically on every
 /// platform and cleans itself up when the process dies (unlike lock files).
 pub fn acquire_instance() -> Instance {
-    let addr = SocketAddr::from(([127, 0, 0, 1], INSTANCE_PORT));
-    match TcpListener::bind(addr) {
+    match TcpListener::bind(instance_addr()) {
         Ok(l) => Instance::Primary(Some(l)),
         Err(_) => {
-            if ping_existing(addr).unwrap_or(false) {
+            if send_signal(Signal::Show).unwrap_or(false) {
                 Instance::Secondary
             } else {
                 // Port taken by something else: run without single-instance support.
@@ -118,28 +146,31 @@ pub fn acquire_instance() -> Instance {
     }
 }
 
-fn ping_existing(addr: SocketAddr) -> Result<bool> {
-    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
+/// Send a signal to the running instance. `Ok(true)` if it acknowledged.
+pub fn send_signal(signal: Signal) -> Result<bool> {
+    let mut s = TcpStream::connect_timeout(&instance_addr(), Duration::from_millis(500))?;
     s.set_read_timeout(Some(Duration::from_millis(1500)))?;
-    writeln!(s, "{HELLO}")?;
+    writeln!(s, "{PROTO} {}", signal.as_str())?;
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line)?;
-    Ok(line.trim() == ACK)
+    Ok(line.trim() == format!("{PROTO} OK"))
 }
 
-/// Serve activation requests forever, calling `on_show` for each valid one.
-pub fn serve_activation(listener: TcpListener, on_show: impl Fn() + Send + 'static) {
+/// Serve signals from later launches forever.
+pub fn serve_signals(listener: TcpListener, on_signal: impl Fn(Signal) + Send + 'static) {
     std::thread::Builder::new()
         .name("ada-instance".into())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-                let mut reader = BufReader::new(&stream);
                 let mut line = String::new();
-                if reader.read_line(&mut line).is_ok() && line.trim() == HELLO {
+                if BufReader::new(&stream).read_line(&mut line).is_err() {
+                    continue;
+                }
+                if let Some(signal) = Signal::parse(&line) {
                     let mut w = &stream;
-                    let _ = writeln!(w, "{ACK}");
-                    on_show();
+                    let _ = writeln!(w, "{PROTO} OK");
+                    on_signal(signal);
                 }
             }
         })
@@ -160,5 +191,26 @@ pub fn notify_updates(found: &[&crate::worker::FoundUpdate]) {
             }
             notify(&format!("{} games were updated", many.len()), &body);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_roundtrip() {
+        for sig in [Signal::Show, Signal::Quit] {
+            assert_eq!(
+                Signal::parse(&format!(
+                    "{PROTO} {}
+",
+                    sig.as_str()
+                )),
+                Some(sig)
+            );
+        }
+        assert_eq!(Signal::parse("GET / HTTP/1.1"), None);
+        assert_eq!(Signal::parse("ADA-STEAM-UPDATE/1 NOPE"), None);
     }
 }

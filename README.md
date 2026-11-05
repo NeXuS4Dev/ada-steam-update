@@ -28,7 +28,15 @@ Ada is a small, fast, native desktop app written in Rust. It runs on Windows, ma
 
 ## Install
 
-Download a build from the Releases page, or build it yourself:
+Download the latest build from the [Releases page](https://github.com/NeXuS4Dev/ada-steam-update/releases/latest):
+
+| Platform | File |
+| --- | --- |
+| Windows 10/11 (x64) | `ada-steam-update-windows-x64.exe`: run it directly, no installer needed |
+| macOS (Apple Silicon) | `ada-steam-update-macos-arm64.tar.gz`: unsigned, so run `xattr -d com.apple.quarantine ada-steam-update` once after extracting |
+| Linux (x64) | `ada-steam-update-linux-x64.tar.gz` |
+
+Or build it yourself:
 
 ```bash
 cargo build --release
@@ -54,9 +62,10 @@ sudo apt install libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxr
 Command-line options:
 
 ```
-ada-steam-update [--minimized]
+ada-steam-update [--minimized | --quit]
 
   --minimized   Start hidden in the system tray
+  --quit        Exit the running instance
   --autostart   Used by the OS at login; honours "Start in the background"
 
   ADA_DATA_DIR  Environment variable: keep all data in this folder (portable mode)

@@ -42,6 +42,14 @@ pub fn diff(old: &BuildSnapshot, new: &BuildSnapshot) -> Option<BuildDiff> {
         }
         platforms.extend(depot.platforms.iter().copied());
     }
+    // Depots that were removed from the branch are changes too.
+    for depot in old.depots.iter().filter(|d| !new.depots.iter().any(|n| n.id == d.id)) {
+        changed += 1;
+        if depot.platforms.is_empty() {
+            touches_shared = true;
+        }
+        platforms.extend(depot.platforms.iter().copied());
+    }
 
     Some(BuildDiff {
         changed_depots: changed,
@@ -97,8 +105,9 @@ pub fn new_record(
     let d = old.and_then(|o| diff(o, new)).unwrap_or_default();
     // Steam's timestamp can lag or be missing; never report a release in the future
     // or before the previous build.
+    // (Not `clamp`: it panics when the local clock is behind Steam's and floor > now.)
     let floor = old.map(|o| o.time_updated).unwrap_or(0);
-    let released_at = if new.time_updated > 0 { new.time_updated.clamp(floor, now) } else { now };
+    let released_at = if new.time_updated > 0 { new.time_updated.max(floor).min(now) } else { now };
     let announcement = match_announcement(events, new.build_id, released_at, used).cloned();
     UpdateRecord {
         app_id,
@@ -224,6 +233,25 @@ mod tests {
         assert_eq!(r.from_build, Some(1));
         assert_eq!(r.download_delta, 10);
         assert!(!r.seen);
+    }
+
+    #[test]
+    fn local_clock_behind_steam_does_not_panic() {
+        // Previous build is stamped after our (skewed) "now".
+        let old = snap(1, 5000, vec![]);
+        let new = snap(2, 6000, vec![]);
+        let r = new_record(5, Some(&old), &new, &[], &HashSet::new(), 4000);
+        assert_eq!(r.released_at, 4000);
+    }
+
+    #[test]
+    fn removed_depots_count_as_changes() {
+        let old = snap(1, 100, vec![depot(1, "a", 10, &[Platform::MacOs]), depot(2, "b", 10, &[Platform::Linux])]);
+        let new = snap(2, 200, vec![depot(2, "b", 10, &[Platform::Linux])]);
+        let d = diff(&old, &new).unwrap();
+        assert_eq!(d.changed_depots, 1);
+        assert_eq!(d.platforms, vec![Platform::MacOs]);
+        assert_eq!(d.download_delta, -10);
     }
 
     #[test]
