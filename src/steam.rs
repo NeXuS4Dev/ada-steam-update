@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::model::{Announcement, AppId, BuildSnapshot, DepotState, Platform, Timestamp};
 
 const USER_AGENT: &str =
-    concat!("AdaSteamUpdate/", env!("CARGO_PKG_VERSION"), " (+https://github.com/your-name/ada-steam-update)");
+    concat!("AdaSteamUpdate/", env!("CARGO_PKG_VERSION"), " (+https://github.com/NeXuS4Dev/ada-steam-update)");
 
 /// Everything we learn about an app from a single product-info request.
 #[derive(Clone, Debug)]
